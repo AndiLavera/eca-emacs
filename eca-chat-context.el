@@ -441,6 +441,22 @@ string."
             (when description
               (truncate-string-to-width description (* 100 eca-chat-window-width))))))
 
+;;;###autoload
+(defun eca-chat-add-selection-to-chat ()
+  "Add current selection or file to the last visited ECA chat buffer.
+If a region is active, use it as the line range.  Otherwise,
+add the whole file."
+  (interactive)
+  (if-let* ((session (eca-session))
+            (chat-buffer (eca-chat--get-last-buffer session))
+            (contexts (eca-chat--get-contexts-dwim)))
+      (progn
+        (eca-chat--with-current-buffer chat-buffer
+          (seq-doseq (context contexts)
+            (eca-chat--add-context context)))
+        (eca-info "Selection added to context"))
+    (eca-error "No ECA session or active selection/file found")))
+
 (defun eca-chat--completion-context-from-new-context-exit-function (item _status)
   "Add to context the selected ITEM."
   (eca-chat--add-context (get-text-property 0 'eca-chat-completion-item item))

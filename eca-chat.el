@@ -239,14 +239,14 @@ Set this to nil to keep the default Emacs mode line (including buffer name)."
 (defcustom eca-chat-diff-tool 'smerge
   "Select the method for displaying file-change diffs in ECA chat."
   :type '(choice (const :tag "Side-by-side Ediff" ediff)
-                 (const :tag "Merge-style Smerge" smerge))
+          (const :tag "Merge-style Smerge" smerge))
   :group 'eca)
 
 (defcustom eca-chat-tool-call-prepare-throttle 'smart
   "Throttle strategy for handling `toolCallPrepare` events.
 Possible values: `all` or `smart` (default)."
   :type '(choice (const :tag "Process all updates" all)
-                 (const :tag "Smart throttle" smart))
+          (const :tag "Smart throttle" smart))
   :group 'eca)
 
 (defcustom eca-chat-tool-call-prepare-update-interval 5
@@ -266,7 +266,7 @@ When nil, no intermediate fontify is scheduled and the buffer is
 only fontified at end-of-stream (jit-lock still handles visible-area
 updates during streaming)."
   :type '(choice (const :tag "Disabled (final ensure only)" nil)
-                 (number :tag "Seconds"))
+          (number :tag "Seconds"))
   :group 'eca)
 
 (defvar-local eca-chat--tool-call-prepare-counters (make-hash-table :test 'equal)
@@ -677,6 +677,7 @@ A plist with :session :request :question :options :tool-call-id :allow-freeform.
     (define-key map (kbd "C-c C-z -") #'eca-chat-image-zoom-out)
     (define-key map (kbd "C-c C-z 0") #'eca-chat-image-zoom-reset)
     (define-key map (kbd "C-c C-z s") #'eca-chat-save-image-at-point)
+    (define-key map (kbd "C-c C-l") #'eca-chat-add-selection-to-chat)
     map)
   "Keymap used by `eca-chat-mode'.")
 
@@ -804,7 +805,7 @@ Cancels the shared timer when no more tool calls are being tracked."
                                                      'eca-chat--elapsed-time t)))
                   (when prop-start
                     (let ((prop-end (next-single-property-change
-                                    prop-start 'eca-chat--elapsed-time nil label-end)))
+                                     prop-start 'eca-chat--elapsed-time nil label-end)))
                       (goto-char prop-start)
                       (delete-region prop-start prop-end)
                       (insert new-time)))))))
@@ -1356,11 +1357,11 @@ Resteps a list of context plists found in the prompt field."
      session
      :method "chat/prompt"
      :params (append (list :message (eca-chat--normalize-prompt prompt)
-                          :request-id (cl-incf eca-chat--last-request-id)
-                          :chatId eca-chat--id
-                          :model (eca-chat--model)
-                          :agent (eca-chat--agent)
-                          :contexts (vconcat refined-contexts))
+                           :request-id (cl-incf eca-chat--last-request-id)
+                           :chatId eca-chat--id
+                           :model (eca-chat--model)
+                           :agent (eca-chat--agent)
+                           :contexts (vconcat refined-contexts))
                      (when-let* ((variant (eca-chat--variant)))
                        (unless (string= variant "-")
                          (list :variant variant)))
@@ -1424,8 +1425,8 @@ Resteps a list of context plists found in the prompt field."
 (defun eca-chat--steer-prompt (session prompt)
   "Steer the running prompt for SESSION by injecting PROMPT at the next LLM turn."
   (setq-local eca-chat--steered-prompt (if eca-chat--steered-prompt
-                                            (concat eca-chat--steered-prompt "\n" prompt)
-                                          prompt))
+                                           (concat eca-chat--steered-prompt "\n" prompt)
+                                         prompt))
   (eca-chat--update-steer-area)
   (eca-chat--set-prompt "")
   (eca-api-notify session
@@ -1578,9 +1579,9 @@ Does not send directly — `eca-chat--send-queued-prompt' handles sending."
                            'keymap agent-keymap))
              "  ")
        (list (propertize "variant:"
-                        'font-lock-face 'eca-chat-option-key-face
-                        'pointer 'hand
-                        'keymap variant-keymap)
+                         'font-lock-face 'eca-chat-option-key-face
+                         'pointer 'hand
+                         'keymap variant-keymap)
              (propertize (or (eca-chat--variant) "-")
                          'font-lock-face 'eca-chat-option-value-face
                          'pointer 'hand
@@ -1966,7 +1967,7 @@ are in progress."
                    (propertize
                     " " 'display
                     `((space :align-to
-                             (- right ,(1+ (length right)))))))))
+                       (- right ,(1+ (length right)))))))))
       (let ((result (concat left fill right)))
         (if (eca-chat--has-pending-approvals-p)
             (propertize result 'face
@@ -2140,7 +2141,7 @@ Show parent upwards if HIDE-FILENAME? is non nil."
           (delete-region (point) (overlay-end ov)))
         (eca-chat--insert (propertize (if (string-empty-p eca-chat--progress-text)
                                           ""
-                                          (concat "\n" eca-chat--progress-text))
+                                        (concat "\n" eca-chat--progress-text))
                                       'font-lock-face 'eca-chat-system-messages-face)
                           eca-chat--spinner-string)))))
 
@@ -2308,7 +2309,7 @@ CHILD, NAME, DOCSTRING and BODY are passed down."
            (when (fboundp 'corfu-mode)
              (setq-local corfu-auto-prefix 0))
            (setq-local eca-chat--server-version
-                        (eca-process--get-current-server-version))
+                       (eca-process--get-current-server-version))
            (when eca-chat-override-mode-line
              (setq-local mode-line-format
                          (if (functionp eca-chat-mode-line-format)
@@ -2483,11 +2484,11 @@ Append STATUS symbol.  Optional PARENT-ID for nested rendering."
           ;; Preserve pending-approval status when a step update arrives with
           ;; loading status — an inner tool call may be waiting for approval.
           (status (if (and existing-ov
-                          (string= status eca-chat-mcp-tool-call-loading-symbol)
-                          (string= (overlay-get existing-ov 'eca-chat--tool-call-status)
-                                   eca-chat-mcp-tool-call-pending-approval-symbol))
-                     eca-chat-mcp-tool-call-pending-approval-symbol
-                   status))
+                           (string= status eca-chat-mcp-tool-call-loading-symbol)
+                           (string= (overlay-get existing-ov 'eca-chat--tool-call-status)
+                                    eca-chat-mcp-tool-call-pending-approval-symbol))
+                      eca-chat-mcp-tool-call-pending-approval-symbol
+                    status))
           (new-label (concat (propertize label 'font-lock-face 'eca-chat-subagent-tool-call-label-face)
                              steps-info " " status time
                              (when approval-text (concat "\n" approval-text))))
@@ -2721,7 +2722,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
        (let* ((flag-text (plist-get content :text))
               (flag-content-id (plist-get content :contentId))
               (flag-str (propertize (concat "🚩️️ " flag-text)
-                                     'font-lock-face 'eca-chat-flag-face))
+                                    'font-lock-face 'eca-chat-flag-face))
               (fork-btn (eca-buttonize
                          eca-chat-mode-map
                          (propertize "Fork from here" 'font-lock-face 'eca-chat-rollback-face)
@@ -3164,12 +3165,12 @@ silently ignored."
           ("running"
            (eca-chat--set-chat-loading session t)
            (eca-chat-content-received session
-            (list :chatId chat-id :role "system"
-                  :content (list :type "progress" :state "running" :text "Running..."))))
+                                      (list :chatId chat-id :role "system"
+                                            :content (list :type "progress" :state "running" :text "Running..."))))
           ("idle"
            (eca-chat-content-received session
-            (list :chatId chat-id :role "system"
-                  :content (list :type "progress" :state "finished")))))))))
+                                      (list :chatId chat-id :role "system"
+                                            :content (list :type "progress" :state "finished")))))))))
 
 ;;; Ask question
 
@@ -3447,7 +3448,7 @@ When ACTIVE is non-nil, show the question prefix; otherwise restore normal."
          (table (lambda (string pred action)
                   (if (eq action 'metadata)
                       `(metadata (display-sort-function . ,#'identity)
-                                 (cycle-sort-function . ,#'identity))
+                        (cycle-sort-function . ,#'identity))
                     (complete-with-action action candidates string pred)))))
     (when-let* ((variant (completing-read "Select a variant:" table nil t)))
       (eca-chat--with-current-buffer (eca-chat--get-last-buffer (eca-session))
