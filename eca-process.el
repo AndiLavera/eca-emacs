@@ -135,7 +135,7 @@ This affects update detection at session start and on `eca-restart',
 so longer-running Emacs sessions can still pick up newer eca releases.
 See also `eca-server-check-updates'."
   :type '(choice (const :tag "Never expire" nil)
-                 (integer :tag "Seconds"))
+          (integer :tag "Seconds"))
   :group 'eca)
 
 (defvar eca-process--releases-cache nil
@@ -399,16 +399,34 @@ the given VERSION."
                       (funcall on-downloaded))))
       (error (eca-error "Failed to download eca server %s" err)))))
 
+(defun eca-process--program-path (path)
+  "Return PATH as a program path suitable for `make-process'.
+Resolves against `default-directory', so when it is a TRAMP path
+PATH is interpreted on the remote host (including `~' and relative
+segments).  The returned string never carries a TRAMP prefix."
+  (let* ((remote (file-remote-p default-directory))
+         (qualified (if (and remote (not (file-remote-p path)))
+                        (concat remote path)
+                      path)))
+    (file-local-name (expand-file-name qualified))))
+
 (defun eca-process--server-command ()
   "Return the command to start server."
-  (let ((system-command (executable-find "eca")))
+  (let ((system-command (executable-find "eca" (file-remote-p default-directory))))
     (cond
-     (eca-custom-command (list :decision 'custom
-                               :command eca-custom-command))
+     (eca-custom-command
+      (list :decision 'custom
+            :command (cons (eca-process--program-path (car eca-custom-command))
+                           (cdr eca-custom-command))))
 
      (system-command
       (list :decision 'system
-            :command (list system-command "server")))
+            :command (list (eca-process--program-path system-command) "server")))
+
+     ((file-remote-p default-directory)
+      (list :decision 'remote-not-found
+            :message
+            "eca not found on remote host. Install eca on the remote PATH or set `eca-custom-command' to the remote eca path."))
 
      ((and (not (f-exists? eca-server-install-path))
            (not (eca-process--get-latest-server-version)))
@@ -529,7 +547,9 @@ Call HANDLE-MSG for new msgs processed."
   (unless (process-live-p (eca--session-process session))
     ;; Clean up any .old binary from previous updates
     (eca-process--cleanup-old-server)
-    (-let* (((result &as &plist :decision decision :command command) (eca-process--server-command))
+    (-let* ((default-directory (or (car (eca--session-workspace-folders session))
+                                   default-directory))
+            ((result &as &plist :decision decision :command command) (eca-process--server-command))
             (start-process-fn (lambda ()
                                 (let ((command (append command eca-extra-args)))
                                   (when eca-process-wrapper-function
@@ -550,7 +570,7 @@ Call HANDLE-MSG for new msgs processed."
                                          :sentinel (lambda (process exit-str)
                                                      (unless (process-live-p process)
                                                        (when-let* ((name (eca-process--stderr-buffer-name session))
-                                                                    (buf (get-buffer name)))
+                                                                   (buf (get-buffer name)))
                                                          (with-current-buffer buf
                                                            (rename-buffer (concat (buffer-name) ":closed") t)
                                                            (setq-local mode-line-format '("*Closed session*"))))
@@ -565,6 +585,8 @@ Call HANDLE-MSG for new msgs processed."
         ('system (funcall start-process-fn))
 
         ('error-download (user-error (eca-error (plist-get result :message))))
+
+        ('remote-not-found (user-error (eca-error (plist-get result :message))))
 
         ('already-installed (funcall start-process-fn))
 
@@ -611,14 +633,16 @@ Call HANDLE-MSG for new msgs processed."
 (defun eca-process--server-version ()
   "Return the server version by running the eca binary with --version."
   (when-let* ((binary (or (car eca-custom-command)
-                          (executable-find "eca")
+                          (executable-find "eca" (file-remote-p default-directory))
                           (when (f-exists? eca-server-install-path)
                             eca-server-install-path)))
+              (program (eca-process--program-path binary))
               (output (ignore-errors
-                        (string-trim
-                         (shell-command-to-string
-                          (format "%s --version 2>/dev/null"
-                                  (shell-quote-argument (expand-file-name binary))))))))
+                        (with-temp-buffer
+                          (when (zerop (process-file program nil
+                                                     (list (current-buffer) (null-device))
+                                                     nil "--version"))
+                            (string-trim (buffer-string)))))))
     (unless (string-empty-p output)
       output)))
 

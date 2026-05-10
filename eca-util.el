@@ -310,11 +310,7 @@ workspace folder. Falls back to \"unknown\"."
 
 (defun eca--path-to-uri (path)
   "Convert a PATH to a uri."
-  (concat eca--uri-file-prefix
-          (--> path
-               (expand-file-name it)
-               (or (file-remote-p it 'localname t) it)
-               (eca--path-local-to-remote it))))
+  (concat eca--uri-file-prefix (eca--path-local-to-remote path)))
 
 (defun eca--uri-to-path (uri)
   "Convert a file URI to a file path."
@@ -343,8 +339,9 @@ The longest matching prefix wins.
 (defun eca--path--translate (path from-fn to-fn expand-from-p)
   "Translate PATH using `eca-local-to-remote-prefix-map'.
 FROM-FN extracts the side of each mapping to match against PATH;
-TO-FN extracts the side to substitute in.  If EXPAND-FROM-P is non-nil,
-expand the from-side path.  The longest matching prefix wins."
+TO-FN extracts the side to substitute in.  If EXPAND-FROM-P is
+non-nil, expand the from-side path.  The longest matching prefix
+wins; when from-lengths tie, the longer to-side wins."
   (let* ((ensure-slash (lambda (s) (if (string-suffix-p "/" s) s (concat s "/"))))
          (sorted (sort (copy-sequence eca-local-to-remote-prefix-map)
                        (lambda (a b)
@@ -368,17 +365,53 @@ expand the from-side path.  The longest matching prefix wins."
               ((string-prefix-p from path)
                (concat to (substring path (length from)))))))
          sorted)
-        path)))
+        nil)))
+
+(defun eca--path-local-name (path)
+  "Return the local name of PATH, stripping TRAMP prefix and expanding."
+  (let ((expanded (expand-file-name path)))
+    (file-local-name expanded)))
 
 (defun eca--path-local-to-remote (path)
-  "Translate a local Emacs PATH to a remote path using `eca-local-to-remote-prefix-map'.
-Uses the longest (most specific) matching prefix to avoid ambiguity."
-  (eca--path--translate (expand-file-name path) #'car #'cdr t))
+  "Translate a local Emacs PATH to a remote path.
+First strips any TRAMP prefix from PATH, then applies
+`eca-local-to-remote-prefix-map' mappings.  The longest matching
+prefix wins."
+  (or (eca--path--translate (eca--path-local-name path) #'car #'cdr t)
+      (eca--path-local-name path)))
+
+(defun eca--path-remote-to-local-tramp (path)
+  "Translate a remote server PATH to a local TRAMP path.
+Falls through to TRAMP workspace folders: matches the closest
+folder by local-name prefix and reconstructs the full TRAMP path.
+If no match is found, returns PATH unchanged."
+  (or (when-let* ((session (ignore-errors (eca-session)))
+                  (folders (eca--session-workspace-folders session))
+                  (ensure-slash (lambda (s) (if (string-suffix-p "/" s) s (concat s "/")))))
+        (let ((sorted (sort (copy-sequence folders)
+                            (lambda (a b)
+                              (> (length (file-local-name a))
+                                 (length (file-local-name b)))))))
+          (when-let (match (seq-find
+                            (lambda (folder)
+                              (let ((localname (funcall ensure-slash (file-local-name folder))))
+                                (or (string= path (directory-file-name localname))
+                                    (string-prefix-p localname path))))
+                            sorted))
+            (let ((localname (file-local-name match)))
+              (if (string= path localname)
+                  match
+                (concat match (substring path (length localname))))))))
+      path))
 
 (defun eca--path-remote-to-local (path)
-  "Translate a remote server PATH to a local Emacs path using `eca-local-to-remote-prefix-map'.
-Uses the longest (most specific) matching prefix to avoid ambiguity."
-  (eca--path--translate path #'cdr #'car nil))
+  "Translate a remote server PATH to a local Emacs path.
+First tries `eca-local-to-remote-prefix-map' (longest matching
+prefix wins).  If no explicit mapping matches, falls through to
+TRAMP workspace folders: matches the closest folder by local-name
+prefix and reconstructs the full TRAMP path."
+  (or (eca--path--translate path #'cdr #'car nil)
+      (eca--path-remote-to-local-tramp path)))
 
 (defun eca-info (format &rest args)
   "Display eca info message with FORMAT with ARGS."
