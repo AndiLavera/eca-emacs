@@ -148,23 +148,41 @@ together with `eca-server-releases-cache-ttl' by
 (cl-defun eca--curl-download-file (&key url path on-done)
   "Downloads a file from URL to PATH shelling out to system with curl.
 Calls ON-DONE when done."
-  (let ((curl-cmd (or (executable-find "curl")
-                      (executable-find "curl.exe"))))
+  (let* ((curl-cmd (or (executable-find "curl" (file-remote-p default-directory))
+                       (executable-find "curl.exe" (file-remote-p default-directory))))
+         (remote (file-remote-p default-directory))
+         (expanded (expand-file-name
+                    (if (and remote (not (file-remote-p path)))
+                        (concat remote path)
+                      path)))
+         (local-path (or (file-remote-p expanded 'localname) expanded))
+         (buf (generate-new-buffer " *eca-curl*")))
     (unless curl-cmd
       (error "Curl not found. Please install curl or customize eca-custom-command"))
-    (let ((exit-code (shell-command (format "%s -L -s -S -f -o %s %s"
-                                            (shell-quote-argument curl-cmd)
-                                            (shell-quote-argument path)
-                                            (shell-quote-argument url)))))
-      (unless (= exit-code 0)
-        (error "Curl failed with exit code %d" exit-code)))
-    (funcall on-done)))
+    (make-process
+     :name "eca-curl"
+     :buffer buf
+     :command (list curl-cmd "-L" "-s" "-S" "-f" "-o" local-path url)
+     :file-handler t
+     :noquery t
+     :sentinel (lambda (proc _event)
+                 (unless (process-live-p proc)
+                   (let ((code (process-exit-status proc)))
+                     (kill-buffer buf)
+                     (if (zerop code)
+                         (funcall on-done)
+                       (eca-error "Curl failed (exit %d) downloading %s" code url))))))))
 
 (cl-defun eca--url-retrieve-download-file (&key url path on-done)
   "Downloads async a file from URL to PATH via `url-retrieve'.
 Calls ON-DONE when done
 Workaround for `url-copy-file` that has issues with macos async threads.
-https://github.com/emacs-lsp/lsp-mode/issues/4746#issuecomment-2957183423"
+https://github.com/emacs-lsp/lsp-mode/issues/4746#issuecomment-2957183423
+
+Not supported for remote installs; signals a `user-error' when
+`default-directory' is a TRAMP path.  Use `curl' instead."
+  (when (file-remote-p default-directory)
+    (user-error "`url-retrieve' download method is not supported for remote installs; set `eca-server-download-method' to `curl'"))
   (url-retrieve
    url
    (lambda (status)
@@ -186,17 +204,19 @@ https://github.com/emacs-lsp/lsp-mode/issues/4746#issuecomment-2957183423"
 
 (defun eca--curl-download-string (url)
   "Download content from URL as a string, shelling out to curl."
-  (let ((curl-cmd (or (executable-find "curl")
-                      (executable-find "curl.exe"))))
+  (let ((curl-cmd (or (executable-find "curl" (file-remote-p default-directory))
+                      (executable-find "curl.exe" (file-remote-p default-directory)))))
     (unless curl-cmd
       (error "Curl not found. Please install curl or customize eca-custom-command"))
-    (let ((output (shell-command-to-string
-                   (format "%s -L -s -S -f %s"
-                           (shell-quote-argument curl-cmd)
-                           (shell-quote-argument url)))))
-      (when (s-blank? output)
-        (error "Curl failed to download from %s" url))
-      output)))
+    (with-temp-buffer
+      (let ((exit-code (process-file curl-cmd nil t nil
+                                     "-L" "-s" "-S" "-f" url)))
+        (unless (= exit-code 0)
+          (error "Curl failed to download from %s (exit %d)" url exit-code))
+        (let ((output (buffer-string)))
+          (when (s-blank? output)
+            (error "Curl failed to download from %s" url))
+          output)))))
 
 (defconst eca-process--releases-url "https://api.github.com/repos/editor-code-assistant/eca/releases"
   "Github url for retrieving json files with infos about release binaries.")
@@ -257,8 +277,9 @@ When VERSION is nil, returns PROPERTY from the latest release."
 
 (defun eca-process--get-current-server-version ()
   "Return the current version of installed server if available."
-  (when (f-exists? eca-server-version-file-path)
-    (f-read eca-server-version-file-path)))
+  (let ((vf (plist-get (eca-process--server-paths) :version-file)))
+    (when (f-exists? vf)
+      (f-read vf))))
 
 (defun eca-process--find-extracted-binary (temp-dir name)
   "Find extracted binary NAME in TEMP-DIR.
@@ -275,17 +296,30 @@ try alternate name with or without .exe."
                              (concat name ".exe")))))
           (when (f-exists? alt) alt))))))
 
-(defun eca-process--download-and-store-path ()
-  "Return the path of the download and store."
-  (let* ((store-path eca-server-install-path)
-         (download-path (concat store-path ".zip")))
-    `(,download-path . ,store-path)))
+(defun eca-process--server-paths ()
+  "Return a plist of all install/download paths, TRAMP-aware.
+Keys: :store, :download, :old, :temp-extract.  When
+`default-directory' is remote, every path carries the TRAMP prefix and
+`~' in `eca-server-install-path' is resolved against the remote HOME."
+  (let* ((remote (file-remote-p default-directory))
+         (raw eca-server-install-path)
+         (store (expand-file-name (if remote (concat remote raw) raw))))
+    (list :store store
+          :download (concat store ".zip")
+          :old (concat store ".old")
+          :version-file (concat (file-name-directory store) "eca-version")
+          ;; Use `file-name-directory' (no IO) instead of `f-parent', which
+          ;; calls `file-truename' and would force a TRAMP roundtrip to the
+          ;; remote just to compute a parent directory.
+          :temp-extract (concat (directory-file-name
+                                 (file-name-directory store))
+                                "-temp"))))
 
 (defun eca-process--cleanup-old-server ()
   "Try to delete any leftover .old server binary from previous update.
 On Windows, running executables can be renamed but not deleted, so we
 clean them up on next startup."
-  (let ((old-path (concat eca-server-install-path ".old")))
+  (let ((old-path (plist-get (eca-process--server-paths) :old)))
     (when (f-exists? old-path)
       (condition-case nil
           (progn
@@ -295,17 +329,36 @@ clean them up on next startup."
 
 (defun eca-process--uninstall-server ()
   "Remove downloaded server."
-  (-let (((download-path . store-path) (eca-process--download-and-store-path)))
+  (let* ((paths (eca-process--server-paths))
+         (download-path (plist-get paths :download))
+         (store-path (plist-get paths :store)))
     (when (f-exists? download-path) (f-delete download-path))
     (when (f-exists? store-path) (f-delete store-path))))
+
+(defun eca-process--remote-uname ()
+  "Return (SYSTEM . ARCH) for current `default-directory'.
+Runs `uname' on the remote when remote, else returns local values."
+  (if (file-remote-p default-directory)
+      (let ((s (with-temp-buffer
+                 (when (zerop (process-file "uname" nil t nil "-s"))
+                   (string-trim (buffer-string)))))
+            (m (with-temp-buffer
+                 (when (zerop (process-file "uname" nil t nil "-m"))
+                   (string-trim (buffer-string))))))
+        (cons (pcase s
+                ("Linux" 'gnu/linux)
+                ("Darwin" 'darwin)
+                (_ (intern (downcase (or s "")))))
+              (or m "x86_64")))
+    (cons system-type (car (split-string system-configuration "-")))))
 
 (defun eca-process--download-url (version)
   "Return the server download url for VERSION."
   (or eca-server-download-url
-      (format "https://github.com/editor-code-assistant/eca/releases/download/%s/eca-native-%s.zip"
-              version
-              (let ((arch (car (split-string system-configuration "-"))))
-                (pcase system-type
+      (-let (((sys . arch) (eca-process--remote-uname)))
+        (format "https://github.com/editor-code-assistant/eca/releases/download/%s/eca-native-%s.zip"
+                version
+                (pcase sys
                   ('gnu/linux (cond
                                ((string= "x86_64" arch) "static-linux-amd64")
                                (t (concat "linux-" arch))))
@@ -316,11 +369,47 @@ clean them up on next startup."
                   ('windows-nt "windows-amd64"))))))
 
 (defun eca-process--get-file-sha256 (file)
-  "Compute and return the SHA256 hash of FILE."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (insert-file-contents-literally file)
-    (secure-hash 'sha256 (current-buffer))))
+  "Compute and return the SHA256 hash of FILE.
+When FILE is remote, run sha256sum/shasum on the remote so the file's
+bytes are not transferred back across TRAMP just to be hashed."
+  (if-let ((remote (file-remote-p file)))
+      (let ((local-name (file-local-name file)))
+        (with-temp-buffer
+          (cond
+           ((executable-find "sha256sum" remote)
+            (unless (zerop (process-file "sha256sum" nil t nil local-name))
+              (error "Remote sha256sum failed for %s" file)))
+           ((executable-find "shasum" remote)
+            (unless (zerop (process-file "shasum" nil t nil "-a" "256" local-name))
+              (error "Remote shasum failed for %s" file)))
+           (t (error "No sha256sum/shasum on remote host; install one or set eca-custom-command")))
+          (car (split-string (buffer-string)))))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally file)
+      (secure-hash 'sha256 (current-buffer)))))
+
+(defun eca-process--unzip-archive (archive dest)
+  "Extract ARCHIVE into DEST."
+  (let* ((remote (file-remote-p default-directory))
+         (script (if remote
+                     eca-ext-unzip-script
+                   (when eca-unzip-script (funcall eca-unzip-script)))))
+    (unless script
+      (error "Unable to find `unzip' or `powershell' on the path, please customize `eca-unzip-script'"))
+    
+    (unless remote
+      (mkdir (file-local-name dest) t))
+
+    (let ((cmd (format script (file-local-name archive) (file-local-name dest)))
+          ;; Prevents macOS `/bin/zsh' and Windows `/c' switches from bleeding over Tramp.
+          (shell-file-name      (if remote "bash" shell-file-name))
+          (shell-command-switch (if remote "-c"   shell-command-switch)))
+      (with-temp-buffer
+        (let ((exit (process-file-shell-command cmd nil t)))
+          (unless (zerop exit)
+            (error "Unzip failed (exit %d) for %s: %s"
+                   exit archive (string-trim (buffer-string)))))))))
 
 (defun eca-process--check-sha256 (download-path url version)
   "Check sha256 checksum of archive at DOWNLOAD-PATH.
@@ -344,22 +433,25 @@ the given VERSION."
 
 (defun eca-process--download-server (on-downloaded version)
   "Download eca server of VERSION calling ON-DOWNLOADED when success."
-  (-let ((url (eca-process--download-url version))
-         ((download-path . store-path) (eca-process--download-and-store-path))
-         (old-path (concat eca-server-install-path ".old"))
-         (temp-extract-dir (concat (f-parent eca-server-install-path) "-temp"))
-         (download-fn (pcase eca-server-download-method
-                        ('url-retrieve #'eca--url-retrieve-download-file)
-                        ('curl #'eca--curl-download-file)
-                        (_ (error (eca-error (format "Unknown download method '%s' for eca-server-download-method" eca-server-download-method)))))))
+  (-let* ((paths (eca-process--server-paths))
+          (download-path (plist-get paths :download))
+          (store-path (plist-get paths :store))
+          (old-path (plist-get paths :old))
+          (version-file (plist-get paths :version-file))
+          (temp-extract-dir (plist-get paths :temp-extract))
+          (url (eca-process--download-url version))
+          (download-fn (pcase eca-server-download-method
+                         ('url-retrieve #'eca--url-retrieve-download-file)
+                         ('curl #'eca--curl-download-file)
+                         (_ (error (eca-error (format "Unknown download method '%s' for eca-server-download-method" eca-server-download-method))))))) 
     (condition-case err
         (progn
           ;; Clean up any old files from previous updates
           (eca-process--cleanup-old-server)
           (when (f-exists? download-path) (f-delete download-path))
-          (when (f-exists? eca-server-version-file-path) (f-delete eca-server-version-file-path))
+          (when (f-exists? version-file) (f-delete version-file))
           (when (f-exists? temp-extract-dir) (f-delete temp-extract-dir t))
-          (mkdir (f-parent download-path) t)
+          (mkdir (file-name-directory download-path) t)
           (eca-info "Downloading eca server from %s to %s..." url download-path)
           (funcall
            download-fn
@@ -369,11 +461,7 @@ the given VERSION."
                       (eca-info "Downloaded eca. Checking sha256...")
                       (eca-process--check-sha256 download-path url version)
                       (eca-info "Unzipping eca...")
-                      (unless (and eca-unzip-script (funcall eca-unzip-script))
-                        (error "Unable to find `unzip' or `powershell' on the path, please customize `eca-unzip-script'"))
-                      ;; Extract to temp directory first
-                      (mkdir temp-extract-dir t)
-                      (shell-command (format (funcall eca-unzip-script) download-path temp-extract-dir))
+                      (eca-process--unzip-archive download-path temp-extract-dir)
                       (let ((new-binary (eca-process--find-extracted-binary
                                          temp-extract-dir (f-filename store-path))))
                         (unless new-binary
@@ -393,7 +481,7 @@ the given VERSION."
                       ;; Try to delete old binary (may fail if still in use, that's ok)
                       (when (f-exists? old-path)
                         (condition-case nil (f-delete old-path) (error nil)))
-                      (f-write-text version 'utf-8 eca-server-version-file-path)
+                      (f-write-text version 'utf-8 version-file)
                       (set-file-modes store-path #o0700)
                       (eca-info "Installed eca successfully!")
                       (funcall on-downloaded))))
@@ -412,7 +500,9 @@ segments).  The returned string never carries a TRAMP prefix."
 
 (defun eca-process--server-command ()
   "Return the command to start server."
-  (let ((system-command (executable-find "eca" (file-remote-p default-directory))))
+  (let* ((paths (eca-process--server-paths))
+         (store (plist-get paths :store))
+         (system-command (executable-find "eca" (file-remote-p default-directory))))
     (cond
      (eca-custom-command
       (list :decision 'custom
@@ -423,25 +513,20 @@ segments).  The returned string never carries a TRAMP prefix."
       (list :decision 'system
             :command (list (eca-process--program-path system-command) "server")))
 
-     ((file-remote-p default-directory)
-      (list :decision 'remote-not-found
-            :message
-            "eca not found on remote host. Install eca on the remote PATH or set `eca-custom-command' to the remote eca path."))
-
-     ((and (not (f-exists? eca-server-install-path))
+     ((and (not (f-exists? store))
            (not (eca-process--get-latest-server-version)))
       (list :decision 'error-download
             :message "Could not fetch latest version of eca. Please check your internet connection and try again. You can also download eca manually and set the path via eca-custom-command variable"))
 
-     ((and (f-exists? eca-server-install-path)
+     ((and (f-exists? store)
            (not (string-version-lessp (eca-process--get-current-server-version)
                                       (eca-process--get-latest-server-version))))
       (list :decision 'already-installed
-            :command (list eca-server-install-path "server")))
+            :command (list (eca-process--program-path store) "server")))
 
      (t (list :decision 'download
               :latest-version (eca-process--get-latest-server-version)
-              :command (list eca-server-install-path "server"))))))
+              :command (list (eca-process--program-path store) "server"))))))
 
 (defun eca-process--parse-header (s)
   "Parse string S as a ECA (KEY . VAL) header."
@@ -585,8 +670,6 @@ Call HANDLE-MSG for new msgs processed."
         ('system (funcall start-process-fn))
 
         ('error-download (user-error (eca-error (plist-get result :message))))
-
-        ('remote-not-found (user-error (eca-error (plist-get result :message))))
 
         ('already-installed (funcall start-process-fn))
 
