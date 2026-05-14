@@ -405,11 +405,7 @@ If no match is found, returns PATH unchanged."
       path))
 
 (defun eca--path-remote-to-local (path)
-  "Translate a remote server PATH to a local Emacs path.
-First tries `eca-local-to-remote-prefix-map' (longest matching
-prefix wins).  If no explicit mapping matches, falls through to
-TRAMP workspace folders: matches the closest folder by local-name
-prefix and reconstructs the full TRAMP path."
+  "Translate a remote server PATH to a local Emacs path."
   (or (eca--path--translate path #'cdr #'car nil)
       (eca--path-remote-to-local-tramp path)))
 

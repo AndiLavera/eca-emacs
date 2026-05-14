@@ -303,10 +303,9 @@ try alternate name with or without .exe."
           (when (f-exists? alt) alt))))))
 
 (defun eca-process--server-paths ()
-  "Return a plist of all install/download paths, TRAMP-aware.
-Keys: :store, :download, :old, :temp-extract. When
-`default-directory' is remote, every path carries the TRAMP prefix and
-`~' in `eca-server-install-path' is resolved against the remote HOME."
+  "Return a plist of all install/download paths.
+Keys: :store, :download, :old, :temp-extract.
+Carries the TRAMP prefix when `default-directory' is remote."
   (let* ((remote (file-remote-p default-directory))
          (raw eca-server-install-path)
          (store (expand-file-name (if remote (concat remote raw) raw))))
@@ -314,9 +313,6 @@ Keys: :store, :download, :old, :temp-extract. When
           :download (concat store ".zip")
           :old (concat store ".old")
           :version-file (concat (file-name-directory store) "eca-version")
-          ;; Use `file-name-directory' (no IO) instead of `f-parent', which
-          ;; calls `file-truename' and would force a TRAMP roundtrip to the
-          ;; remote just to compute a parent directory.
           :temp-extract (concat (directory-file-name
                                  (file-name-directory store))
                                 "-temp"))))
@@ -342,8 +338,7 @@ clean them up on next startup."
     (when (f-exists? store-path) (f-delete store-path))))
 
 (defun eca-process--remote-uname ()
-  "Return (SYSTEM . ARCH) for current `default-directory'.
-Runs `uname' on the remote when remote, else returns local values."
+  "Return (SYSTEM . ARCH) for current `default-directory'."
   (if (file-remote-p default-directory)
       (let ((s (with-temp-buffer
                  (when (zerop (process-file "uname" nil t nil "-s"))
@@ -376,9 +371,7 @@ Runs `uname' on the remote when remote, else returns local values."
                   ('windows-nt "windows-amd64"))))))
 
 (defun eca-process--get-file-sha256 (file)
-  "Compute and return the SHA256 hash of FILE.
-When FILE is remote, run sha256sum/shasum on the remote so the file's
-bytes are not transferred back across TRAMP just to be hashed."
+  "Compute and return the SHA256 hash of FILE."
   (if-let ((remote (file-remote-p file)))
       (with-temp-buffer
         (let* ((local (file-local-name file))
@@ -494,10 +487,7 @@ the given VERSION."
       (error (eca-error "Failed to download eca server %s" err)))))
 
 (defun eca-process--program-path (path)
-  "Return PATH as a program path suitable for `make-process'.
-Resolves against `default-directory', so when it is a TRAMP path
-PATH is interpreted on the remote host (including `~' and relative
-segments).  The returned string never carries a TRAMP prefix."
+  "Return PATH as a program path for `make-process'."
   (let* ((remote (file-remote-p default-directory))
          (qualified (if (and remote (not (file-remote-p path)))
                         (concat remote path)
