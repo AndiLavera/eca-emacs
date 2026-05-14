@@ -148,14 +148,14 @@ together with `eca-server-releases-cache-ttl' by
 (cl-defun eca--curl-download-file (&key url path on-done)
   "Downloads a file from URL to PATH shelling out to system with curl.
 Calls ON-DONE when done."
-  (let* ((curl-cmd (or (executable-find "curl" (file-remote-p default-directory))
-                       (executable-find "curl.exe" (file-remote-p default-directory))))
-         (remote (file-remote-p default-directory))
+  (let* ((remote (file-remote-p default-directory))
+         (curl-cmd (or (executable-find "curl" remote)
+                       (executable-find "curl.exe" remote)))
          (expanded (expand-file-name
                     (if (and remote (not (file-remote-p path)))
                         (concat remote path)
                       path)))
-         (local-path (or (file-remote-p expanded 'localname) expanded))
+         (local-path (file-local-name expanded))
          (buf (generate-new-buffer " *eca-curl*")))
     (unless curl-cmd
       (error "Curl not found. Please install curl or customize eca-custom-command"))
@@ -168,10 +168,16 @@ Calls ON-DONE when done."
      :sentinel (lambda (proc _event)
                  (unless (process-live-p proc)
                    (let ((code (process-exit-status proc)))
-                     (kill-buffer buf)
                      (if (zerop code)
-                         (funcall on-done)
-                       (eca-error "Curl failed (exit %d) downloading %s" code url))))))))
+                         (progn
+                           (kill-buffer buf)
+                           (funcall on-done))
+                       ;; Extract error output
+                       (let ((output (with-current-buffer buf
+                                       (string-trim (buffer-string)))))
+                         (kill-buffer buf)
+                         (error "Curl failed (exit %d) downloading %s: %s"
+                                code url output)))))))))
 
 (cl-defun eca--url-retrieve-download-file (&key url path on-done)
   "Downloads async a file from URL to PATH via `url-retrieve'.
@@ -298,7 +304,7 @@ try alternate name with or without .exe."
 
 (defun eca-process--server-paths ()
   "Return a plist of all install/download paths, TRAMP-aware.
-Keys: :store, :download, :old, :temp-extract.  When
+Keys: :store, :download, :old, :temp-extract. When
 `default-directory' is remote, every path carries the TRAMP prefix and
 `~' in `eca-server-install-path' is resolved against the remote HOME."
   (let* ((remote (file-remote-p default-directory))
@@ -365,6 +371,7 @@ Runs `uname' on the remote when remote, else returns local values."
                   ('darwin (concat "macos-"
                                    (cond
                                     ((string= "x86_64" arch) "amd64")
+                                    ((string= "arm64" arch) "aarch64")
                                     (t arch))))
                   ('windows-nt "windows-amd64"))))))
 
@@ -373,17 +380,19 @@ Runs `uname' on the remote when remote, else returns local values."
 When FILE is remote, run sha256sum/shasum on the remote so the file's
 bytes are not transferred back across TRAMP just to be hashed."
   (if-let ((remote (file-remote-p file)))
-      (let ((local-name (file-local-name file)))
-        (with-temp-buffer
-          (cond
-           ((executable-find "sha256sum" remote)
-            (unless (zerop (process-file "sha256sum" nil t nil local-name))
-              (error "Remote sha256sum failed for %s" file)))
-           ((executable-find "shasum" remote)
-            (unless (zerop (process-file "shasum" nil t nil "-a" "256" local-name))
-              (error "Remote shasum failed for %s" file)))
-           (t (error "No sha256sum/shasum on remote host; install one or set eca-custom-command")))
+      (with-temp-buffer
+        (let* ((local (file-local-name file))
+               (exit-code (cond
+                           ((executable-find "sha256sum" remote)
+                            (process-file "sha256sum" nil t nil local))
+                           ((executable-find "shasum" remote)
+                            (process-file "shasum" nil t nil "-a" "256" local))
+                           (t
+                            (error "No sha256sum/shasum on remote host")))))
+          (unless (zerop exit-code)
+            (error "Remote hash computation failed for %s" file))
           (car (split-string (buffer-string)))))
+    ;; local
     (with-temp-buffer
       (set-buffer-multibyte nil)
       (insert-file-contents-literally file)
@@ -401,10 +410,7 @@ bytes are not transferred back across TRAMP just to be hashed."
     (unless remote
       (mkdir (file-local-name dest) t))
 
-    (let ((cmd (format script (file-local-name archive) (file-local-name dest)))
-          ;; Prevents macOS `/bin/zsh' and Windows `/c' switches from bleeding over Tramp.
-          (shell-file-name      (if remote "bash" shell-file-name))
-          (shell-command-switch (if remote "-c"   shell-command-switch)))
+    (let ((cmd (format script (file-local-name archive) (file-local-name dest))))
       (with-temp-buffer
         (let ((exit (process-file-shell-command cmd nil t)))
           (unless (zerop exit)
@@ -443,7 +449,7 @@ the given VERSION."
           (download-fn (pcase eca-server-download-method
                          ('url-retrieve #'eca--url-retrieve-download-file)
                          ('curl #'eca--curl-download-file)
-                         (_ (error (eca-error (format "Unknown download method '%s' for eca-server-download-method" eca-server-download-method))))))) 
+                         (_ (error (eca-error (format "Unknown download method '%s' for eca-server-download-method" eca-server-download-method)))))))
     (condition-case err
         (progn
           ;; Clean up any old files from previous updates

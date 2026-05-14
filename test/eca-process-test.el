@@ -115,13 +115,11 @@
         (expect (plist-get p :temp-extract) :to-equal "/home/test/.eca/bin-temp")))))
 
 (describe "eca-process--unzip-archive"
-  (it "invokes bash, not host shell-file-name, on remote"
+  (it "invokes /bin/sh, not host shell-file-name, on remote"
     (let ((default-directory "/ssh:host:/workspace/")
-          ;; Simulate macOS host: zsh exists locally but won't exist in
-          ;; most Linux containers. Routing through it would crash the
-          ;; remote exec before unzip ever ran.
+          ;; Simulate macOS with zsh on host but not remote.
           (shell-file-name "/bin/zsh")
-          (eca-ext-unzip-script "bash -c 'mkdir -p %2$s && unzip -qq -o %1$s -d %2$s'")
+          (eca-ext-unzip-script "mkdir -p %2$s && unzip -qq -o %1$s -d %2$s")
           captured-program captured-args)
       (spy-on 'process-file :and-call-fake
               (lambda (program &rest args)
@@ -131,8 +129,8 @@
       (eca-process--unzip-archive
        "/ssh:host:/home/node/.eca/bin/eca.zip"
        "/ssh:host:/home/node/.eca/bin-temp")
-      (expect captured-program :to-equal "bash")
-      ;; args = (INFILE BUFFER DISPLAY &rest PROGRAM-ARGS)
+      
+      (expect captured-program :to-equal "/bin/sh")
       (expect (nth 3 captured-args) :to-equal "-c")
       (expect (nth 4 captured-args) :to-match "/home/node/.eca/bin/eca.zip")
       (expect (nth 4 captured-args) :to-match "/home/node/.eca/bin-temp")))
